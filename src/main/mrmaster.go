@@ -24,6 +24,8 @@ func main() {
 	for m.Done() == false {
 		time.Sleep(time.Second)
 	}
-
-	time.Sleep(time.Second)
+	// main goroutine结束后,程序结束
+	// rpc服务随即也关闭,此时有的worker还在向master要Task
+	// sleep一会等所有的worker都要到了Over消息再结束
+	time.Sleep(2 * time.Second)
 }
