@@ -173,10 +173,11 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 		case <-rf.heartbeatsTimer.C:
 			rf.mu.Lock()
-			if rf.RaftStatus == Leader {
-				rf.BroadcastHeartbeat() // 函数立即返回
-				rf.heartbeatsTimer.Reset(HeardBeatTimeout * time.Millisecond)
+			if rf.RaftStatus != Leader {
+				panic("非leader状态下心跳计时器超时")
 			}
+			rf.BroadcastHeartbeat() // 函数立即返回
+			rf.heartbeatsTimer.Reset(HeardBeatTimeout * time.Millisecond)
 			rf.mu.Unlock()
 		}
 	}
@@ -214,75 +215,72 @@ func (rf *Raft) BroadcastHeartbeat() {
 }
 
 // 请求其他Server 为自己投票
-// 🔐🔐🔐🔐🔐🔐🔐🔐 在持有锁的状态下被调用
+// 🔐 在持有锁的状态下被调用
 func (rf *Raft) CampaignForVotes() {
-	args := rf.genRequestVoteArgs()
+	args := rf.genRequestVoteArgs() // 不要放到下面goroutine中产生
 	rf.voteFor = rf.me
 	currentVoteCount := 1
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
 		}
-		// 1. 在对raft结构体加锁的前提下执行StartElection
-		// 2. 锁在StartElection结束之后才释放
-		// 3. 发送RequestVoteArgs的goroutine在开始的时候获取锁
-		//  所有的发送RequestVoteArgs的goroutine要等到StartElection之后执行
+		// P:
+		// 1. 在对raft结构体加锁的前提下执行CampaignForVotes
+		// 2. 锁在CampaignForVotes束之后才释放
+		// 3. 发送RequestVoteArgs不需要获取锁(锁用来保护Raft数据结构)
+		// 4. 在下面的goroutine中,是在收到RequestVoteReply后尝试获取锁
+		// P->Q:
+		//   1. RequestVoteArgs的发出是紧凑的
+		//   2. 在CampaignForVotes结束后,goroutines才陆续看到RequestVoteReply的内容
+
+		// question:
+		// 虽然RequestVoteArgs的发出是紧凑的,但是并不是原子的,可能在发送的过程中变成了Follower或Leader
+		// 那在状态改变了的情况下,是否还有必要继续发送?
+		// answer:
+		// args的生成是最初的时刻,goroutines发出的RequestVoteArgs是一样的.发出的早晚受go调度影响,这带来
+		// 的延时远小于一个网络RTT,将这块时延并入RTT,可以等价于所有的RequestVoteArgs是同时发出的
+
 		go func(peer int) {
-			// 此时RequestVoteArgs还没发送
-			// 在ticker的当前case结束后(释放了rf.mu)和在获取到rf.mu锁之间
-			// 可能已经离开了Candidate状态,成为Follower或者Leader
-			// 就没必要继续发送RequestVoteArgs了吗?
-
-			// 收到RequestVoteReply后进行状态调整,这是一个RTT网络时延之后的事
-			// 这个延迟远大于goroutine 发出多个请求,因此可以视为多个goroutine
-			// 同时发出了RequestVoteArgs请求
-
-			// 收到RequestVoteReply至少一个RTT,但是可能受到AppendEntriesArgs,和
-			// RequestVoteArgs.这些可能会造成状态切换回Follower.
-
-			// 但是raft中未讨论这种投票请求终止的情况,
-			// 因为如果当前节点退回Follower,说明当前节点已经落后
-			// 发出的RequestVoteArgs中的term落后,不会影响更新的Node
-
 			var reply RequestVoteReply
-
 			DPrintf(rf.me, "Term: %v | {Node %v} -> {Node %v} RequestVoteArgs: %v", rf.currentTerm, rf.me, peer, args)
 			if rf.sendRequestVote(peer, &args, &reply) {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 				// 收到 RequestVoteReply
 				DPrintf(rf.me, "Term: %v | {Node %v} <- {Node %v} RequestVoteReply: %v", rf.currentTerm, rf.me, peer, reply)
-				// 根据图4的状态转换,candidate有可能发现更高的任期号后转换成Follower
-				// 给出选票的人看过RequestVoteArgs中的term后会更新自己的任期,reply.Term不可能小于rf.currentTerm
-				// 在ticker超时处于Candidate状态,但是现在可能变回Follower,这会导致term增加,状态改变
+				// 根据图4的状态转换
+				// 1. candidate 还在args.Term任期收集选票
+				// 2. 搜集超过半数选票,成为args.Term任期的Leader
+				// 3. arg.Term任期内未能收集超半数选票,选举计时器超时,进入新一轮选举
+				// 4. 收到Leader的AppendEntriesArgs,转换成Follower
+				// 5. 看到更高的任期号T,set currentTerm=T,转变为Follower
+				// State
+				// case 1: candidate && currentTerm == args.Term
+				// case 2: Leader && currentTerm == args.Term
+				// case 3: Candidate && currentTerm > args.Term
+				// case 4: Follower && currentTerm >= args.Term, 新Leader可能同期的选民,也可能是因为网络分区,才收到一个领先分区的Leader的AppendEntriesArgs
+				// case 5: Follower && currentTerm > args.Term
 
-				// 此时可能处于 Follower or Candidate or Leader
-				// 1. Follower:收到更高Term currentTerm > args.Term
-				// 2. Leader: 成为当选 currentTerm == args.Term
-				// 3. Candidate: 新一轮选举开始 currentTerm > args.Term
-				// 4. Candidate: 当前选举还在进行中
-				// 只有case 4需要继续处理
-				if args.Term == rf.currentTerm && rf.RaftStatus == Candidate {
-					// 如果给当前Node 投了赞成
+				// case2 - case5 意味着当前节点在args.Term任期选举结束,所以只需要处理case1
+				if rf.currentTerm == args.Term && rf.RaftStatus == Candidate {
 					if reply.VoteGranted {
 						currentVoteCount += 1
 						if currentVoteCount > len(rf.peers)/2 {
 							DPrintf(rf.me, "Term: %v | {Node %v} 收到了半数选票当选 Leader", rf.currentTerm, rf.me)
 							rf.ChangeState(Leader)
 						}
-
-						// 没有给自己投票, 两个因素1.任期 2.LastLog
-						// 如果是因为任期原因
+						// 没有给自己投票, 两个因素: 1.任期 2.LastLog
+						// 如果是因为任期原因,else包含两个原因,所以这里用else if
 					} else if reply.Term > args.Term {
 						// 只会发生一次,这段代码只有在Candid才能到达
-						DPrintf(rf.me, "{Node %v} 在自己第%v 任期投票期间,从{Node %v} 的reply中发现了更高的任期 %v, 转变为Follower", rf.me, args.Term, peer, reply.Term)
+						DPrintf(rf.me, "[Warning]: Term : %v | {Node %v} <- {Node %v}  RequestVoteReply: %v 中包含更高任期号:%v",rf.currentTerm, rf.me, peer, reply, reply.Term)
 						rf.ChangeState(Follower)
 						rf.currentTerm = reply.Term
 						rf.voteFor = -1
 					}
 				}
 			} else {
-				DPrintf(rf.me, "Term: %v | {Node %v} 未成功收到 {Node %v} 的RequestVoteReply", rf.currentTerm, rf.me, peer)
+				DPrintf(rf.me, "[error]: Term: %v | {Node %v} 未成功收到 {Node %v} 的RequestVoteReply", rf.currentTerm, rf.me, peer)
 			}
 		}(peer)
 	}
@@ -467,7 +465,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else if args.Term > rf.currentTerm {
 		rf.ChangeState(Follower)
 		rf.currentTerm = args.Term
-		rf.voteFor = -1 // 新任期我还没有给任何人投票
+		rf.voteFor = -1
 		if rf.IsLogOlderOrEqual(args) {
 			reply.VoteGranted = true
 			rf.voteFor = args.CandidateId
