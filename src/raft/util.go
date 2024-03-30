@@ -43,7 +43,8 @@ func DPrintf(peer int, format string, a ...interface{}) (n int, err error) {
     }
 
     // 设置每个peer的列宽度
-    const columnWidth = 55
+    //const columnWidth = 55
+    const columnWidth = 0
 
     // 根据peer计算前导空格的数量
     padding := strings.Repeat(" ", peer*columnWidth)
