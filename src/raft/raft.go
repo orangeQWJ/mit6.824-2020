@@ -69,6 +69,7 @@ type Raft struct {
 	persister       *Persister          // Object to hold this peer's persisted state
 	me              int                 // this peer's index into peers[]
 	dead            int32               // set by Kill()
+	applyCh         chan ApplyMsg       // key-value层通过这个收到ApplyMsg,最终应用日志
 	currentTerm     int                 // 服务器已知的最新任期(在服务器首次启动时设为0,单调增)
 	voteFor         int                 // 当前任期内给 candidateId 投了赞成，如果没有给任何候选人投赞成 则为空.根据定义,切换到新任期时置为-1
 	log             []logEntry          // 每个条目包含了用于状态机的命令，以及领导人接收到该条目时的任期（初始索引为1）
@@ -91,41 +92,45 @@ func (rf *Raft) ResetElectionTimeout() {
 	rf.electionTimer.Reset(randomDuration())
 }
 
-// 返回最后一条日志的索引(第一条日志索引为1),若没有日志返回-1
-func (rf *Raft) getLastLogIndex() int {
-	if len(rf.log) == 0 {
-		return -1
-	} else {
-		return len(rf.log)
-	}
-}
 
-// 获得倒数第二条日志的任期
-func (rf *Raft) getPrevLogTerm() int {
-	if len(rf.log) >= 2 {
-		return rf.log[len(rf.log)-2].Term
-	} else {
-		return -1
-	}
+// 返回最后一条日志的索引
+// 0: 没有日志
+func (rf *Raft) getLastLogIndex() int {
+	// [x] len = 1  target:0
+	// [x, 1] len = 2 target:1
+	// [x, 1, 2] len = 3  target:2
+	// [x, 1, 2, 3] len = 4 target:3
+	return len(rf.log) - 1
 }
 
 // 获得倒数第二条日志的索引
 func (rf *Raft) getPrevLogIndex() int {
-	if len(rf.log) >= 2 {
-		return len(rf.log) - 1
-	} else {
-		return -1
-	}
+	// [x] len = 1  target: -1
+	// [x, 1] len = 2 target: 0
+	// [x, 1, 2] len = 3  target: 1
+	// [x, 1, 2, 3] len = 4 target: 2
+	return len(rf.log) - 2 
 }
 
 // 返回最后一条日志的任期号,若没有日志返回-1
 func (rf *Raft) getLastLogTerm() int {
-	if len(rf.log) == 0 {
-		return -1
-	} else {
-		return rf.log[len(rf.log)-1].Term
+	if len(rf.log) < 2 {
+	return -1
+	}else {
+		return rf.log[rf.getLastLogIndex()].Term
 	}
 }
+
+// 获得倒数第二条日志的任期,若没有日志返回-1
+func (rf *Raft) getPrevLogTerm() int {
+	if len(rf.log) < 3 {
+		return -1
+	}else {
+		return rf.log[rf.getPrevLogIndex()].Term
+	}
+}
+
+
 
 // 产生一个RequestVoteArgs
 func (rf *Raft) genRequestVoteArgs() RequestVoteArgs {
@@ -273,7 +278,7 @@ func (rf *Raft) CampaignForVotes() {
 						// 如果是因为任期原因,else包含两个原因,所以这里用else if
 					} else if reply.Term > args.Term {
 						// 只会发生一次,这段代码只有在Candid才能到达
-						DPrintf(rf.me, "[Warning]: Term : %v | {Node %v} <- {Node %v}  RequestVoteReply: %v 中包含更高任期号:%v",rf.currentTerm, rf.me, peer, reply, reply.Term)
+						DPrintf(rf.me, "[Warning]: Term : %v | {Node %v} <- {Node %v}  RequestVoteReply: %v 中包含更高任期号:%v", rf.currentTerm, rf.me, peer, reply, reply.Term)
 						rf.ChangeState(Follower)
 						rf.currentTerm = reply.Term
 						rf.voteFor = -1
@@ -398,11 +403,14 @@ type AppendEntriesReply struct {
 }
 
 // args 指向的日志至少和rf一样新
+// 选举限制
 func (rf *Raft) IsLogOlderOrEqual(args *RequestVoteArgs) bool {
 	raftLastLogTerm := rf.getLastLogTerm()
 	raftLastLogIndex := rf.getLastLogIndex()
-	//  args 的日志至少和rf的日志一样新
-	if args.Term > raftLastLogTerm || (args.Term == raftLastLogTerm && args.LastLogIndex >= raftLastLogIndex) {
+	// Raft 通过比较两份日志中最后一条日志条目的索引值和任期号定义谁的日志比较新。
+	// 如果两份日志最后的条目的任期号不同，那么任期号大的日志更加新。
+	// 如果两份日志最后的条目任期号相同，那么日志比较长的那个就更加新。
+	if args.LastLogTerm > raftLastLogTerm || (args.LastLogTerm == raftLastLogTerm && args.LastLogIndex >= raftLastLogIndex) {
 		return true
 	}
 	return false
@@ -529,7 +537,20 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	if rf.killed() {
+		return index, term, false
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	//如果不是leader直接返回
+	if rf.RaftStatus != Leader {
+		return index, term, false
+	}
+	currentLogEntry := logEntry{Term: rf.currentTerm, Command: command}
+	rf.log = append(rf.log, currentLogEntry)
+	index = len(rf.log)
+	term = rf.currentTerm
 	return index, term, isLeader
 }
 
@@ -567,6 +588,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		peers:           peers,
 		persister:       persister,
 		me:              me,
+		dead:            0,
+		applyCh:         applyCh,
 		currentTerm:     0,
 		voteFor:         -1,
 		log:             make([]logEntry, 1),
@@ -580,6 +603,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 	DPrintf(rf.me, "{Node %d} 完成了初始化", rf.me)
 	rf.heartbeatsTimer.Stop()
+
 	go rf.ticker()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
