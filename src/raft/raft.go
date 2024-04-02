@@ -19,6 +19,7 @@ package raft
 
 import (
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,6 +55,7 @@ const (
 
 type logEntry struct {
 	Term    int
+	Index   int
 	Command interface{}
 }
 type ApplyMsg struct {
@@ -92,7 +94,6 @@ func (rf *Raft) ResetElectionTimeout() {
 	rf.electionTimer.Reset(randomDuration())
 }
 
-
 // 返回最后一条日志的索引
 // 0: 没有日志
 func (rf *Raft) getLastLogIndex() int {
@@ -104,33 +105,40 @@ func (rf *Raft) getLastLogIndex() int {
 }
 
 // 获得倒数第二条日志的索引
+/*
 func (rf *Raft) getPrevLogIndex() int {
 	// [x] len = 1  target: -1
 	// [x, 1] len = 2 target: 0
 	// [x, 1, 2] len = 3  target: 1
 	// [x, 1, 2, 3] len = 4 target: 2
-	return len(rf.log) - 2 
+	return len(rf.log) - 2
 }
+*/
 
 // 返回最后一条日志的任期号,若没有日志返回-1
 func (rf *Raft) getLastLogTerm() int {
 	if len(rf.log) < 2 {
-	return -1
-	}else {
+		return -1
+	} else {
 		return rf.log[rf.getLastLogIndex()].Term
 	}
 }
 
+/*
 // 获得倒数第二条日志的任期,若没有日志返回-1
 func (rf *Raft) getPrevLogTerm() int {
 	if len(rf.log) < 3 {
 		return -1
-	}else {
+	} else {
 		return rf.log[rf.getPrevLogIndex()].Term
 	}
 }
+*/
 
-
+func (rf *Raft) matchLog(prevLogIndex int, prevLogTerm int) bool {
+	// log[0].Term == -1
+	return rf.log[prevLogIndex].Term == prevLogTerm
+}
 
 // 产生一个RequestVoteArgs
 func (rf *Raft) genRequestVoteArgs() RequestVoteArgs {
@@ -143,13 +151,64 @@ func (rf *Raft) genRequestVoteArgs() RequestVoteArgs {
 
 }
 
-func (rf *Raft) genHeartbeatAppendEntriesArgs() AppendEntriesArgs {
+func (rf *Raft) genAppendEntriesArgs(peer int, isHeartBeat bool) AppendEntriesArgs {
+	/*
+		pI: args.prevLogIndex
+		nx: rf.nextIndex[peer]
+		pT: args.prevLogTerm
+		F:Follower.log
+		L:Leader.log
+		eg:
+		F: [x, 1, 2, 3] _
+				 pI->^  ^<-nx
+		L: [x, 1, 2, 3, 4, 5, 6, 7]
+		pI = nx - 1
+		pT = L.[pI].Term
+
+		// 最初
+		F: [x] _
+		pI->^  ^<-nx
+		L: [x]
+		nx:1 pI=nx-1==0
+		pT: L.log[pT].Term == -1
+
+		F: [x]
+		L: [x, 1]
+		   pI->^<-nx
+		pI = nx - 1
+		pT = L.log[pI].Term
+
+		nx 初始化为leader最后一个日志index+1
+		最初都是1
+		Leader 发送AppendEntries的函数中知道自己在entries中放了多少日志
+		如果AppendEntriesReply.Success == true
+		应该有一个处理函数,针对AppendEntriesReply的信息,来更新nextIndex和matchIndex
+		并更新commitIndex和lastApplied
+
+		entries = L.log[nx:]
+
+		F: [x, 1, 2, 3] _
+				 pI->^  ^<-nx
+		L: [x, 1, 2, 3, 4, 5, 6, 7]
+
+		处理reply
+		if success
+			matchIndex =
+
+
+	*/
 	var args AppendEntriesArgs
 	args.Term = rf.currentTerm
 	args.LeaderId = rf.me
-	args.PrevLogIndex = rf.getPrevLogIndex()
-	args.PrevLogTerm = rf.getLastLogTerm()
-	args.Entries = []logEntry{}
+	// 心跳用不到这两个字段
+	args.PrevLogIndex = rf.nextIndex[peer] - 1
+	args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+	if isHeartBeat {
+		args.Entries = []logEntry{}
+	} else {
+		// todo 要考虑lastApplied
+		args.Entries = rf.log[rf.nextIndex[peer]:]
+	}
 	args.LeaderCommit = rf.commitIndex
 	return args
 }
@@ -192,12 +251,12 @@ func (rf *Raft) ticker() {
 // 🔐🔐🔐🔐🔐🔐🔐🔐 在持有锁的状态下被调用
 func (rf *Raft) BroadcastHeartbeat() {
 	DPrintf(rf.me, "Term: %v | {Node %v} 开始广播心跳", rf.currentTerm, rf.me)
-	args := rf.genHeartbeatAppendEntriesArgs()
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
 		}
 		go func(peer int) {
+			args := rf.genAppendEntriesArgs(peer, true)
 			var reply AppendEntriesReply
 			DPrintf(rf.me, "Term: %v | {Node %v} -> {Node %v} AppendEntriesArgs: %v", rf.currentTerm, rf.me, peer, args)
 			if rf.sendAppendEntries(peer, &args, &reply) {
@@ -216,6 +275,73 @@ func (rf *Raft) BroadcastHeartbeat() {
 			}
 			//}
 		}(peer)
+	}
+}
+
+// 🔐
+// 向Follower广播AppendEntries
+func (rf *Raft) BroadcastAppendEntries() {
+	for peer := range rf.peers {
+		if peer == rf.me {
+			continue
+		}
+		go func(peer int) {
+			args := rf.genAppendEntriesArgs(peer, false)
+			var reply AppendEntriesReply
+			DPrintf(rf.me, "Term: %v | {Node %v} -> {Node %v} AppendEntriesArgs: %v", rf.currentTerm, rf.me, peer, args)
+			if rf.sendAppendEntries(peer, &args, &reply) {
+				rf.handleAppendEntriesReply(peer, args, reply)
+			}
+		}(peer)
+	}
+}
+
+func (rf *Raft) handleAppendEntriesReply(peer int, args AppendEntriesArgs, reply AppendEntriesReply) {
+	DPrintf(rf.me, "Term: %v | {Node %v} <- {Node %v} AppendEntriesReply: %v", rf.currentTerm, rf.me, peer, reply)
+	if reply.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
+		rf.ChangeState(Follower)
+		rf.voteFor = -1
+	}
+	/*
+		F: [x, 1, 2, 3]  _
+				 pI->^   ^<-nx
+		L: [x, 1, 2, 3, 4, 5, 6, 7]
+		entries: [4, 5, 6, 7]
+		len(entries) = 4
+		pI + len(entries) = 3 + 4 = 7
+		rf.matchIndex = 7
+	*/
+	if reply.Success {
+		rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
+		// 更新commitIndex
+		if rf.commitIndex != rf.matchIndex[rf.me] {
+			panic("leader 没有在nextindex中维护自己的数据")
+		}
+		// t:matchIndex
+		t := make([]int, len(rf.matchIndex))
+		copy(t, rf.matchIndex)
+		sort.Ints(t)
+		maxReplicatedLogIndex := t[len(rf.peers)/2]
+		if rf.log[maxReplicatedLogIndex].Term == rf.currentTerm {
+			rf.commitIndex = maxReplicatedLogIndex
+		}
+		// 应用日志
+		for rf.lastApplied < rf.commitIndex {
+			applyMsg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[rf.lastApplied+1].Command,
+				CommandIndex: rf.lastApplied + 1,
+			}
+			rf.lastApplied++
+			rf.applyCh <- applyMsg
+		}
+	} else {
+		// todo 快速恢复逻辑
+		rf.nextIndex[peer]--
+		// 如果啥都不做,依靠下一次心跳来再一次发送,那数据的更新延迟就不可能超过一个心跳
+		// 如果有新消息日志追加,立马调用一次心跳,即可减少时延
+		// 这种追加失败是针对AppendEntries追加失败情况下的,而失败不常发生,所以思路可行
 	}
 }
 
@@ -299,7 +425,7 @@ func (rf *Raft) ChangeState(Rs RaftStatus) {
 		// 图2 Volatile state on leader,下面蓝字 Reinitialized after election
 		//initialized to leader last log index + 1
 		for i := 0; i < len(rf.nextIndex); i++ {
-			rf.nextIndex[i] = len(rf.log) + 1
+			rf.nextIndex[i] = rf.getLastLogIndex() + 1
 		}
 		//initialized to 0
 		for i := 0; i < len(rf.matchIndex); i++ {
@@ -391,8 +517,8 @@ type RequestVoteReply struct {
 type AppendEntriesArgs struct {
 	Term         int        // 领导人任期
 	LeaderId     int        // 领导人 ID 因此跟随者可以对客户端进行重定向
-	PrevLogIndex int        // 倒数第二条日志的索引
-	PrevLogTerm  int        // 倒数第二条日志的任期
+	PrevLogIndex int        // 用来确保Follower日志与Leader同步,值为rf.nextIndex[peer]-1
+	PrevLogTerm  int        // 用来确保Follower日志与Leader同步,值为log[prevLogIndex].Term
 	Entries      []logEntry //需要flower被保存的日志条目（被当做心跳使用时，则日志条目内容为空；为了提高效率可能一次性发送多个）
 	LeaderCommit int        // 领导人的已知已提交的最高的日志条目的索引
 }
@@ -400,6 +526,15 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int  //当前任期号,for leader to update itself
 	Success bool // flower在preveLogIndex位置的日志的任期是prevlogTerm, 则为true
+	/*
+		- XTerm：这个是Follower中与Leader冲突的Log对应的任期号。
+			在之前（7.1）有介绍Leader会在prevLogTerm中带上本地Log记录中，
+			前一条Log的任期号。如果Follower在对应位置的任期号不匹配，它
+			会拒绝Leader的AppendEntries消息，并将自己的任期号放在XTerm中。
+			如果Follower在对应位置没有Log，那么这里会返回 -1。
+		- XIndex：这个是Follower中，对应任期号为XTerm的第一条Log条目的槽位号。
+		- XLen：如果Follower在对应位置没有Log，那么XTerm会返回-1，XLen表示空白的Log槽位数。
+	*/
 }
 
 // args 指向的日志至少和rf一样新
@@ -442,6 +577,124 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.ChangeState(Follower)
 		}
 		rf.ResetElectionTimeout()
+	}
+}
+
+func (rf *Raft) AppendEntries_2B(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	DPrintf(rf.me, "{Node %v} 收到了心跳广播", rf.me)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	DPrintf(rf.me, "Term: %v | {Node %v} <- {Leader} AppendEntriesArgs: %v", rf.currentTerm, rf.me, args)
+	defer DPrintf(rf.me, "Term: %v | {Node %v} -> {Leader} AppendEntriesReply: %v", rf.currentTerm, rf.me, reply)
+
+	if args.Term < rf.currentTerm {
+		reply.Term, reply.Success = rf.currentTerm, false
+		return
+	} else if args.Term == rf.currentTerm {
+		// 同一任期不可能有两个Leader,当前节点Follower 或者 Candidate
+		reply.Term, reply.Success = rf.currentTerm, false
+		if rf.RaftStatus != Follower {
+			rf.ChangeState(Follower)
+		}
+		rf.ResetElectionTimeout()
+	} else if args.Term > rf.currentTerm {
+		reply.Term, reply.Success = args.Term, false
+		rf.currentTerm = args.Term
+		rf.voteFor = -1
+		if rf.RaftStatus != Follower {
+			rf.ChangeState(Follower)
+		}
+		rf.ResetElectionTimeout()
+	}
+	// 在2A中完成了
+	// 1. 重置ResetElectionTimeout的任务
+	// 2. 状态切换的任务
+	// 此时reply.success都是false
+	// 接下来只需要补上
+	// if 不可以追加:
+	//     为快速恢复提供更多的信息
+	// else:
+	//     根据图二实现追加
+	if !rf.matchLog(args.PrevLogIndex, args.PrevLogTerm) {
+		// todo 为快速恢复要提供更多信息
+		return
+	}
+	// success=true, if Follower contained entry matching prevLogIndex and prevLogTerm 
+	reply.Success = true
+	// 如果为空,不需要追加
+	if len(args.Entries) == 0{
+		return
+		//没有更新commitIndex,lastApplied
+	}
+	// 可以追加日志了
+	// if an existing entry conflicts with a new one (same index but different terms),
+	// delete the existing entry and all that follow it
+	// 这里的 if 至关重要。如果追随者拥有领导者发送的所有条目，则追随者不得截断其日志。
+	// 领导者发送的条目后面的任何元素都必须保留。
+	// 这是因为我们可能会从领导者那里收到过时的 AppendEntries RPC，
+	// 并且截断日志意味着“收回”我们可能已经告诉领导者我们在日志中拥有的条目。
+	// 只有AppendEntriesArgs里的entries和Follower的log冲突时,才能将Follower的log截断
+
+	// 综合考虑go的语法与图2要求, 分两种情况讨论
+	// case1 : 最后一条日志无法通过下标放入log
+	//      eg: log: [x, 1, 2, 3, 4, 5] prevLogIndex = 3  entries = [4, 5, 6, 7, 8, 9]  这些数字都是index,省略了其他信息
+	//                         ^ <- prevLogIndex                                    ^ <- entriesLastIndex
+	//      直接将prevLogIndex后面的截断,然后追加entries
+	// case2 : entries的最后一条日志能通过下标放入log
+	//      eg: log[x, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, ....100]  entries[(4, term, command), (5 ...), (6...)]
+	//		tips: 索引为i的entry, 要放到索引为i的位置, entries最后一条索引9, 放入log[9], 要求长度至少10
+	//      1. 待插入的entries的下标都是合法下标
+	//      2. 遍历看是否需要截断
+	//      3. 如果需要截断,直接将prevLogIndex后面的截断,然后追加entries
+	entriesLastIndex := args.Entries[len(args.Entries)-1].Index
+	if len(rf.log) <= entriesLastIndex {
+		rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...) //tips 前闭后开
+	} else {
+		truncFlag := false
+		i := args.PrevLogIndex + 1
+		for _, entry := range args.Entries {
+			if entry.Term != rf.log[i].Term { // index相同,term不相同
+				truncFlag = true
+				break
+			}
+			rf.log[i] = entry
+			i += 1
+		}
+		if truncFlag {
+			rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+		}
+	}
+	// 提交
+	// The min in the final step (#5) of AppendEntries is necessary,
+	// and it needs to be computed with the index of the last new entry.
+	// It is not sufficient to simply have the function that applies
+	// things from your log between lastApplied and commitIndex stop
+	// when it reaches the end of your log. This is because you may
+	// have entries in your log that differ from the leader’s log after
+	// the entries that the leader sent you (which all match the ones in your log).
+	// Because #3 dictates that you only truncate your log if you have conflicting entries,
+	// those won’t be removed, and if leaderCommit is beyond the entries the leader sent you,
+	// you may apply incorrect entries.
+	// case2 : entries的最后一条日志能通过下标放入log
+	//      eg: log[x, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, ....100]  entries[(4, term, command), (5 ...), (6...)]
+	//		tips: 索引为i的entry, 要放到索引为i的位置, entries最后一条索引9, 放入log[9], 要求长度至少10
+	// 如果entries所有的entry都不冲突,这种情况下,是不会截断 7-100的.如果此时LeaderCommit >= 7,可能提交一些不正确的日志
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = args.LeaderCommit
+		if args.Entries[len(args.Entries)-1].Index < args.LeaderCommit {
+			rf.commitIndex = args.Entries[len(args.Entries)-1].Index
+		}
+	}
+	// 这里往管道写是否会堵塞
+	for rf.lastApplied < rf.commitIndex {
+		applyMsg := ApplyMsg{
+			CommandValid: true,
+			Command:      rf.log[rf.lastApplied+1].Command,
+			CommandIndex: rf.lastApplied + 1,
+		}
+		rf.lastApplied++
+		rf.applyCh <- applyMsg
 	}
 }
 
@@ -603,6 +856,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 	DPrintf(rf.me, "{Node %d} 完成了初始化", rf.me)
 	rf.heartbeatsTimer.Stop()
+	rf.log[0].Term = -1
 
 	go rf.ticker()
 	// initialize from state persisted before a crash
