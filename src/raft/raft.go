@@ -54,8 +54,9 @@ const (
 )
 
 type logEntry struct {
-	Term    int
-	Index   int
+	Term int
+	// fix:1
+	//Index   int
 	Command interface{}
 }
 type ApplyMsg struct {
@@ -71,10 +72,10 @@ type Raft struct {
 	persister       *Persister          // Object to hold this peer's persisted state
 	me              int                 // this peer's index into peers[]
 	dead            int32               // set by Kill()
-	applyCh         chan ApplyMsg       // key-value层通过这个收到ApplyMsg,最终应用日志
-	currentTerm     int                 // 服务器已知的最新任期(在服务器首次启动时设为0,单调增)
+	applyCh         chan ApplyMsg       // key-value层通过这个收到ApplyMsg, 最终应用日志内容
+	currentTerm     int                 // latest term server has seen(initialized to 0 on first boot, increase monotonically<单调地>)
 	voteFor         int                 // 当前任期内给 candidateId 投了赞成，如果没有给任何候选人投赞成 则为空.根据定义,切换到新任期时置为-1
-	log             []logEntry          // 每个条目包含了用于状态机的命令，以及领导人接收到该条目时的任期（初始索引为1）
+	log             []logEntry          // 每个条目包含了用于状态机的命令，以及领导人接收到该条目时的任期（初始索引为1）fix:1
 	commitIndex     int                 // 已知已提交的最高的日志条目的索引（初始值为0，单调递增
 	lastApplied     int                 // 已经被应用到状态机的最高的日志条目的索引（初始值为0，单调递增）
 	nextIndex       []int               // 对于每一台服务器，发送到该服务器的下一个日志条目的索引（初始值为领导人最后的日志条目的索引+1）
@@ -94,8 +95,15 @@ func (rf *Raft) ResetElectionTimeout() {
 	rf.electionTimer.Reset(randomDuration())
 }
 
-// 返回最后一条日志的索引
-// 0: 没有日志
+/*
+## 1.日志约定
+log := [{0, -1, _}, {1, term, command}, {2, term, command} ....,  {index, term, command}]
+1. log[0] 为无效日志填充, 逻辑索引号与物理索引号统一了.索引为2的日志放在log[2]
+2. log[0].Term == -1
+3. 无log时(仅有log[0])
+*/
+
+// 返回最后一条日志的索引,若没有日志返回0
 func (rf *Raft) getLastLogIndex() int {
 	// [x] len = 1  target:0
 	// [x, 1] len = 2 target:1
@@ -104,20 +112,9 @@ func (rf *Raft) getLastLogIndex() int {
 	return len(rf.log) - 1
 }
 
-// 获得倒数第二条日志的索引
-/*
-func (rf *Raft) getPrevLogIndex() int {
-	// [x] len = 1  target: -1
-	// [x, 1] len = 2 target: 0
-	// [x, 1, 2] len = 3  target: 1
-	// [x, 1, 2, 3] len = 4 target: 2
-	return len(rf.log) - 2
-}
-*/
-
 // 返回最后一条日志的任期号,若没有日志返回-1
 func (rf *Raft) getLastLogTerm() int {
-	if len(rf.log) < 2 {
+	if len(rf.log) <= 1 {
 		return -1
 	} else {
 		return rf.log[rf.getLastLogIndex()].Term
@@ -125,6 +122,7 @@ func (rf *Raft) getLastLogTerm() int {
 }
 
 /*
+这是对prevLog的错误理解
 // 获得倒数第二条日志的任期,若没有日志返回-1
 func (rf *Raft) getPrevLogTerm() int {
 	if len(rf.log) < 3 {
@@ -135,14 +133,9 @@ func (rf *Raft) getPrevLogTerm() int {
 }
 */
 
+// 用于检查Follower日志是否与Leader一致
 func (rf *Raft) matchLog(prevLogIndex int, prevLogTerm int) bool {
-	// log[0].Term == -1
-	/*
-		L: [x, 1, 2, 3, 4, 5, 6, 7, 8]
-					^ <- nextIndex[Follower]
-		F: [x, 1]
-	*/
-	if rf.getLastLogIndex() < prevLogIndex {
+	if rf.getLastLogIndex() < prevLogIndex { // rf.log[prevLogIndex] 越界
 		return false
 	}
 	return rf.log[prevLogIndex].Term == prevLogTerm
@@ -203,35 +196,22 @@ func (rf *Raft) genAppendEntriesArgs(peer int) AppendEntriesArgs {
 		处理reply
 		if success
 			matchIndex =
-
-
 	*/
 	var args AppendEntriesArgs
 	args.Term = rf.currentTerm
 	args.LeaderId = rf.me
 	args.PrevLogIndex = rf.nextIndex[peer] - 1
-	if args.PrevLogIndex >= len(rf.log) {
-		DPrintf(rf.me, "=======================")
-		DPrintf(rf.me, "rf.me: %v", rf.me)
-		DPrintf(rf.me, "rf.log: %v", rf.log)
-		DPrintf(rf.me, "nextIndex[] : %v", rf.nextIndex)
-		DPrintf(rf.me, "args.PrevLogIndex: %v", args.PrevLogIndex)
-		DPrintf(rf.me, "=======================")
-		panic("越界1")
-	}
 	args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
-	//if rf.nextIndex[rf.me]  == rf.matchIndex[peer] + 1 {
 	if rf.nextIndex[rf.me] == rf.nextIndex[peer] {
-		// if 防止else情况中下标越界
+		// 防止else情况中下标越界
 		// F: [x, 1] 根据matchIndex
 		// L: [x, 1]
-		//            ^ <- nextIndex[peer]
-		//DPrintf(5, "产生的空Entry: %v", args.Entries)
+		//           ^ <-nextIndex[peer]
 		args.Entries = []logEntry{}
 	} else {
 		// F: [x, 1]
 		// L: [x, 1, 2]
-		//           ^ <- nextIndex[peer]
+		//           ^ <-nextIndex[peer]
 		args.Entries = rf.log[rf.nextIndex[peer]:]
 		//DPrintf(5, "产生的Entry: %v", args.Entries)
 	}
@@ -239,7 +219,6 @@ func (rf *Raft) genAppendEntriesArgs(peer int) AppendEntriesArgs {
 	return args
 }
 
-// campaign
 // 监听心跳超时计时器和选举超时计时器
 func (rf *Raft) ticker() {
 	// tips: CampaignForVotes,BroadcastHeartbeat函数都是在加锁的情况下执行,因此要尽快返回,避免性能下降
@@ -266,7 +245,6 @@ func (rf *Raft) ticker() {
 			if rf.RaftStatus != Leader {
 				panic("非leader状态下心跳计时器超时")
 			}
-			//rf.BroadcastHeartbeat() // 函数立即返回
 			rf.BroadcastAppendEntries()
 			rf.heartbeatsTimer.Reset(HeardBeatTimeout * time.Millisecond)
 			rf.mu.Unlock()
@@ -408,7 +386,6 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args AppendEntriesArgs, reply
 // 请求其他Server 为自己投票
 // 🔐 在持有锁的状态下被调用
 func (rf *Raft) CampaignForVotes() {
-	DPrintf(rf.me, "Term: %v | {Node %v} 开始收集选票", rf.currentTerm, rf.me)
 	args := rf.genRequestVoteArgs() // 不要放到下面goroutine中产生
 	rf.voteFor = rf.me
 	currentVoteCount := 1
@@ -417,7 +394,7 @@ func (rf *Raft) CampaignForVotes() {
 			continue
 		}
 		// P:
-		// 1. 在对raft结构体加锁的前提下执行CampaignForVotes
+		// 1. 在对raft结构体加锁的情况下下执行CampaignForVotes
 		// 2. 锁在CampaignForVotes束之后才释放
 		// 3. 发送RequestVoteArgs不需要获取锁(锁用来保护Raft数据结构)
 		// 4. 在下面的goroutine中,是在收到RequestVoteReply后尝试获取锁
@@ -438,7 +415,6 @@ func (rf *Raft) CampaignForVotes() {
 			if rf.sendRequestVote(peer, &args, &reply) {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				// 收到 RequestVoteReply
 				DPrintf(rf.me, "Term: %v | {Node %v} <- {Node %v} RequestVoteReply: %v", rf.currentTerm, rf.me, peer, reply)
 				// 根据图4的状态转换
 				// 1. candidate 还在args.Term任期收集选票
@@ -662,8 +638,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.ResetElectionTimeout()
 	} else if args.Term > rf.currentTerm {
 		// todo
-		//reply.Term, reply.Success = args.Term, false
-		reply.Term, reply.Success = rf.currentTerm, false
+		reply.Term, reply.Success = args.Term, false
+		//reply.Term, reply.Success = rf.currentTerm, false
 		rf.currentTerm = args.Term
 		rf.voteFor = -1
 		if rf.RaftStatus != Follower {
@@ -686,8 +662,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	// success=true, if Follower contained entry matching prevLogIndex and prevLogTerm
 	reply.Success = true
-	// 如果为空,不需要追加
-	if len(args.Entries) == 0 {
+	/* 当初是防溢出的逻辑,
+	if len(args.Entries) == -100 {
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = args.LeaderCommit
 		}
@@ -704,6 +680,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 		//没有更新commitIndex,lastApplied
 	}
+	*/
+
 	// 可以追加日志了
 	// if an existing entry conflicts with a new one (same index but different terms),
 	// delete the existing entry and all that follow it
@@ -726,7 +704,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//      3. 如果需要截断,直接将prevLogIndex后面的截断,然后追加entries
 	///DPrintf(rf.me, "entries 不为空")
 
-	entriesLastIndex := args.Entries[len(args.Entries)-1].Index
+	entriesLastIndex := args.PrevLogIndex + len(args.Entries)
 	if len(rf.log) <= entriesLastIndex {
 		rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...) //tips 前闭后开
 	} else {
@@ -763,8 +741,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 如果entries所有的entry都不冲突,这种情况下,是不会截断 7-100的.如果此时LeaderCommit >= 7,可能提交一些不正确的日志
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = args.LeaderCommit
-		if args.Entries[len(args.Entries)-1].Index < args.LeaderCommit {
-			rf.commitIndex = args.Entries[len(args.Entries)-1].Index
+		if args.PrevLogIndex + len(args.Entries) < args.LeaderCommit {
+			rf.commitIndex = args.PrevLogIndex + len(args.Entries)
 		}
 	}
 	// 这里往管道写是否会堵塞
@@ -881,7 +859,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	// 将command封装进entry
-	currentLogEntry := logEntry{Term: rf.currentTerm, Command: command, Index: rf.getLastLogIndex() + 1}
+	//currentLogEntry := logEntry{Term: rf.currentTerm, Command: command, Index: rf.getLastLogIndex() + 1}
+	currentLogEntry := logEntry{Term: rf.currentTerm, Command: command}
 	DPrintf(rf.me, "Term: %v | start->Entry %v", rf.currentTerm, currentLogEntry)
 	rf.log = append(rf.log, currentLogEntry)
 	rf.nextIndex[rf.me] = rf.getLastLogIndex() + 1
