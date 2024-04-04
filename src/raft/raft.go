@@ -318,6 +318,7 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args AppendEntriesArgs, reply
 		rf.currentTerm = reply.Term
 		rf.ChangeState(Follower)
 		rf.voteFor = -1
+		return
 	}
 	/*
 				F: [x, 1, 2, 3]  _
