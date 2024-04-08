@@ -192,15 +192,6 @@ func (rf *Raft) IsLogOlderOrEqual(args *RequestVoteArgs) bool {
 - [x] logEntry 的全局修改索引 fix:1
 - [x] RPC接收端可能收到重复的报文,review注意
 
-# 2B 测试
-- [x] TestBasicAgree2B
-- [ ] TestRPCBytes2B
-- [ ] TestFailAgree2B
-func TestFailNoAgree2B
-func TestConcurrentStarts2B
-func TestRejoin2B
-func TestBackup2B
-func TestCount2B
 # 疑问
 
 - commitIndex,lastApplied 作为易失状态如何如何在故障后恢复

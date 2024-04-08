@@ -5,7 +5,7 @@ success_count=0
 fail_count=0
 
 # 循环运行程序20次
-for i in {1..100}; do
+for i in {1..1000}; do
     echo "运行次数: $i"
 
     # 运行程序并捕获输出

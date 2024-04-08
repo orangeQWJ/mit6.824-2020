@@ -61,6 +61,9 @@ func DPrintf(peer int, format string, a ...interface{}) {
 }
 
 func DPrintInfo(rf *Raft) {
+	if Debug <= 0 {
+		return
+	}
 	format := `
    RaftStatus: %v
    currentTerm: %v
@@ -95,6 +98,7 @@ func args2str(args *AppendEntriesArgs) string {
 	//s :="args:\nTerm: %v\n LeaderId: %v\n PrevLogIndex: %v\n PrevLogTerm: %v \nlen(Entries): %v\n LeaderCommit: %v\n"
 	//s := "Term: %v LeaderId: %v PrevLogIndex: %v PrevLogTerm: %v Entries: %v LeaderCommit: %v"
 	s := "T: %v LId: %v PI: %v PT: %v Entry: %v LC: %v"
-	s = fmt.Sprintf(s, args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, log2str(args.PrevLogIndex, args.Entries), args.LeaderCommit)
+	//s = fmt.Sprintf(s, args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, log2str(args.PrevLogIndex, args.Entries), args.LeaderCommit)
+	s = fmt.Sprintf(s, args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries), args.LeaderCommit)
 	return s
 }
