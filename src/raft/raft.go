@@ -151,8 +151,6 @@ func (rf *Raft) genRequestVoteArgs() RequestVoteArgs {
 }
 
 func (rf *Raft) genAppendEntriesArgs(peer int) AppendEntriesArgs {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	args := AppendEntriesArgs{}
 	args.Term = rf.currentTerm
 	args.LeaderId = rf.me
@@ -202,23 +200,33 @@ func (rf *Raft) ticker() {
 //🔐
 // 广播AppendEntries
 func (rf *Raft) BroadcastAppendEntries() {
+	currentTerm := rf.currentTerm
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
 		}
 		go func(peer int) {
+			// 当leader看到更高的Term时会切换到Follower,但是这个goroutine并不会结束
+			// eg: 某个节点(非Leader)网络故障,这个节点的选举时钟一直超时,任期号就一直增加
+			// 当它的网络修复后,Leader会看到一个很好的任期,就会切换回Follower
+			rf.mu.Lock()
+			// 确保产生正确的报文
+			if rf.currentTerm != currentTerm || rf.RaftStatus != Leader {
+				return 
+			}
 			args := rf.genAppendEntriesArgs(peer)
+			rf.mu.Unlock()
 			reply := AppendEntriesReply{}
 			//DPrintInfo(rf)
 			//DPrintf(rf.me, log2str(-1, rf.log))
+			if !rf.sendAppendEntries(peer, &args, &reply) {
+				//DPrintf(rf.me, "[Error] Term: %v | {%v}->{%v} ApArgs: %v", rf.currentTerm, rf.me, peer, args2str(&args))
+				return
+			}
 			DPrintf(rf.me, "Leader:log.length: %v", len(rf.log))
 			DPrintf(rf.me, "lastApplied: %v", rf.lastApplied)
 			DPrintf(rf.me, "Term: %v | {%v}->{%v} ApArgs: %v", rf.currentTerm, rf.me, peer, args2str(&args))
 			////DPrintf(rf.me, "[try] Term: %v | {Node %v} -> {Node %v} AppendEntriesArgs", rf.currentTerm, rf.me, peer)
-			if !rf.sendAppendEntries(peer, &args, &reply) {
-				DPrintf(rf.me, "[Error] Term: %v | {%v}->{%v} ApArgs: %v", rf.currentTerm, rf.me, peer, args2str(&args))
-				return
-			}
 			//DPrintf(rf.me, "Term: %v | {Node %v} -> {Node %v} AppendEntriesArgs: %v", rf.currentTerm, rf.me, peer, args2str(&args))
 			DPrintf(rf.me, "Term: %v | {%v}<-{%v} ApReply: %v", rf.currentTerm, rf.me, peer, reply)
 			rf.handleAppendEntriesReply(peer, args, reply)
@@ -237,6 +245,7 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args AppendEntriesArgs, reply
 		rf.voteFor = -1
 		return
 	}
+	// 收到AppendEntriesReply时,可能已经不是args.Term 任期内的Leader
 	if !(rf.currentTerm == args.Term  && rf.RaftStatus == Leader){
 		return
 	}
