@@ -50,14 +50,17 @@ To implement heartbeats
   [x, 1, 2, 3] len = 4
   if len()
   LastIndex = len-1
+- 那些只调用一次的函数,将锁放在函数前后,比放在函数内部可读性更好
+- test 并不会停止goroutine,所以要通过rf.killed来停止对外提供服务
+
 
 # 关于进行持久化的时间节点
-
 ## 需要持久化的状态
 
 1. currentTerm
 2. voteFor
 3. log
+4. 这三个变量一旦发生变化就一定要在被其他协程感知到之前（释放锁之前，发送 rpc 之前）持久化，这样才能保证原子性。
 
 ## 1.选举计时器超时,发送 RequestVoteArgs 之前
 
@@ -191,6 +194,12 @@ func (rf *Raft) IsLogOlderOrEqual(args *RequestVoteArgs) bool {
 - [x] logEntry 添加 Index 的必要性,论文中没有此字段,但是演示动画中有.
 - [x] logEntry 的全局修改索引 fix:1
 - [x] RPC接收端可能收到重复的报文,review注意
+- [x] 当某一个节点在一个独立的网络分区,他会不断的选举超时,然后任期号++. 
+	但是目前对待旧任期的rpc请求都是忽略.当这个节点重新练会网络如何融入新的集体
+	他会在AppendEntriesReply报文中告诉Leader更新的Term
+
+- [x] bug: 当不是Leader后停止发送AppendEntriesArgs报文
+- [ ] perf: 如果在调用Start时不立即BroadcastAppendEntries,这会影响写入时延,如果立即写入,当大量写入发生时,会有大量的重复log
 
 # 疑问
 
@@ -204,3 +213,22 @@ func (rf *Raft) IsLogOlderOrEqual(args *RequestVoteArgs) bool {
   比如建立在 Raft 之上的键值存储系统），所有直到索引 7 为止的日志条目都可以被应用？
   如果是这样，是否就存在重复应用已经应用过的日志条目的风险？如果存在这样的风险，
   通常有哪些策略来避免或处理这种重复应用的问题？
+
+
+
+# logTopic
+- dClient (CLNT) - 与客户端相关的操作或交互，如客户端请求的接收和处理。
+- dCommit (CMIT) - 提交操作，标志着一个或多个Raft日志条目已被安全存储且可应用到状态机。
+- dDrop (DROP) - 丢弃消息或数据，可能是因为消息无效或在处理过程中遇到错误。
+- dError (ERRO) - 错误事件，通常是系统遇到无法正常处理的异常情况。
+- dInfo (INFO) - 提供一般性信息，用于记录系统状态或非关键事件。
+- dLeader (LEAD) - 与领导者选举或领导者活动相关的事件，如领导者的更换。
+- dLog (LOG1), dLog2 (LOG2) - 日志相关事件，可能涉及日志的创建、修改或复制。在Raft中，这通常指日志复制过程。
+- dPersist (PERS) - 持久化相关事件，如日志条目或当前状态的持久化存储。
+- dSnap (SNAP) - 快照操作，通常与状态机的快照创建和恢复相关。
+- dTerm (TERM) - 与任期相关的事件，如任期的开始、结束或任期内发生的重要动作。
+- dTest (TEST) - 测试相关的日志记录，可能用于调试或验证系统功能。
+- dTimer (TIMR) - 定时器事件，可能与选举超时、心跳超时等计时任务相关。
+- dTrace (TRCE) - 跟踪信息，用于详细记录系统的内部操作和决策过程。
+- dVote (VOTE) - 投票事件，涉及Raft选举过程中的投票行为。
+- dWarn (WARN) - 警告事件，用于提示可能的问题，但不一定影响系统的正常运行。
