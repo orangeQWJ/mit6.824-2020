@@ -247,6 +247,17 @@ func (rf *Raft) BroadcastAppendEntries() {
 	}
 }
 
+func (rf *Raft) logCotainTerm(term int) (index int) {
+	index  = -1
+	for i, entry := range rf.log{
+		if entry.Term == term {
+			index = i
+			return
+		}
+	}
+	return
+}
+
 // 🔐处理AppendEntriesReply
 func (rf *Raft) handleAppendEntriesReply(peer int, args AppendEntriesArgs, reply AppendEntriesReply) {
 	if rf.killed() {
@@ -265,7 +276,17 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args AppendEntriesArgs, reply
 	}
 	if !reply.Success {
 		// todo 快速恢复逻辑
-		rf.nextIndex[peer]--
+		if reply.XTerm == -1 {
+			rf.nextIndex[peer] = rf.nextIndex[peer] - reply.XLen
+			return
+		} else if rf.logCotainTerm(reply.XTerm) != -1{
+			rf.nextIndex[peer] = reply.XIndex + 1
+		} else {
+			rf.nextIndex[peer] = reply.XIndex
+		}
+
+		//rf.nextIndex[peer]--
+		//rf.nextIndex[peer] = 1
 		return
 
 	}
@@ -650,6 +671,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if !rf.matchLog(args.PrevLogIndex, args.PrevLogTerm) {
 		reply.Success = false
 		// todo 为快速恢复要提供更多信息
+		if args.PrevLogIndex > rf.getLastLogIndex() {
+			reply.XTerm = -1
+			reply.XLen = args.PrevLogIndex - rf.getLastLogIndex()
+		}else {
+			reply.XTerm = rf.log[args.PrevLogIndex].Term
+			for i, entry := range rf.log {
+				if entry.Term == reply.XTerm{
+					reply.XIndex = i
+					break
+				}
+			}
+		}
 		return
 	}
 	// success = true, if Follower contained entry matching prevLogIndex and prevLogTerm
