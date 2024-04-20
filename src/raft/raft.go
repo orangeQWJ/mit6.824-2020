@@ -170,14 +170,18 @@ func (rf *Raft) genAppendEntriesArgs(peer int) AppendEntriesArgs {
 // 监听心跳超时计时器和选举超时计时器
 func (rf *Raft) ticker() {
 	// tips: CampaignForVotes,BroadcastHeartbeat函数都是在加锁的情况下执行,因此要尽快返回,避免性能下降
-	// test 并不会停止goroutine
+	// test 并不会停止goroutine, 当节点被kill时不应该再主动对其他节点发送rpc请求
 	for rf.killed() == false {
 		select {
 		case <-rf.electionTimer.C:
+			// 考虑这样一种情况, 当前处于非Leader,但是没有立即获得锁
+			// 在等待获得锁期间,变成Leader状态,
+			// 所以不应该使用panic对状态判断
 			rf.mu.Lock()
 			DebugP(dTimer, rf.me, "{%v} 选举计时器超时,新任期: %v:", rf.me, rf.currentTerm+1)
 			if rf.RaftStatus == Leader {
 				DebugP(dWarn, rf.me, "Leader 选举计时器choa超时")
+				rf.mu.Unlock()
 				continue
 				//DebugP(dError, rf.me, "[Error] Leader 状态选举计时器超时")
 				//panic("Leader状态 选举计时器超时")
@@ -190,12 +194,14 @@ func (rf *Raft) ticker() {
 			rf.ElectionTimerReset()
 			rf.mu.Unlock()
 		case <-rf.heartbeatsTimer.C:
-			// 进入case但是获取锁之前,可能在Leader状态下选举超时,
-			// 当获得锁的时候已经不是Leader了,所以不应该使用panic对状态判断
+			// 考虑这样一种情况, 当前处于Leader,但是没有立即获得锁
+			// 在等待获得锁期间,已经不是Leader状态,
+			// 所以不应该使用panic对状态判断
 			rf.mu.Lock()
 			DebugP(dTimer, rf.me, "{%v} 心跳计时器超时 ", rf.me)
 			if rf.RaftStatus != Leader {
 				DebugP(dWarn, rf.me, "非Leader 心跳计时器超时")
+				rf.mu.Unlock()
 				continue
 				//DebugP(dError, rf.me, "[Error] 非Leader 心跳计时器超时")
 				//DebugP(dError, rf.me, raftInfo2str(rf))
@@ -236,6 +242,10 @@ func (rf *Raft) BroadcastAppendEntries() {
 			}
 			// 日志状态可能有问题,因为要在genAppendEntriesArgs之前释放锁,在它之后获得锁.有间隙,raft状态的改变可能不是因为当前reply
 			rf.mu.Lock()
+			if !(rf.currentTerm == currentTerm && rf.RaftStatus == Leader) {
+				rf.mu.Unlock()
+				return
+			}
 			//DPrintf(rf.me, "Leader:LastLogIndex: %v", rf.getLastLogIndex())
 			//DPrintf(rf.me, "lastApplied: %v", rf.lastApplied)
 			//DPrintInfo(rf)
@@ -248,8 +258,8 @@ func (rf *Raft) BroadcastAppendEntries() {
 }
 
 func (rf *Raft) logCotainTerm(term int) (index int) {
-	index  = -1
-	for i, entry := range rf.log{
+	index = -1
+	for i, entry := range rf.log {
 		if entry.Term == term {
 			index = i
 			return
@@ -279,12 +289,13 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args AppendEntriesArgs, reply
 		if reply.XTerm == -1 {
 			rf.nextIndex[peer] = rf.nextIndex[peer] - reply.XLen
 			return
-		} else if rf.logCotainTerm(reply.XTerm) != -1{
+		} else if rf.logCotainTerm(reply.XTerm) != -1 {
+			// Leader 有这个任期的日志
 			rf.nextIndex[peer] = reply.XIndex + 1
 		} else {
+			// Leader 没有这个任期的日志
 			rf.nextIndex[peer] = reply.XIndex
 		}
-
 		//rf.nextIndex[peer]--
 		//rf.nextIndex[peer] = 1
 		return
@@ -426,7 +437,7 @@ func (rf *Raft) CampaignForVotes() {
 			if reply.VoteGranted {
 				currentVoteCount += 1
 				if currentVoteCount > len(rf.peers)/2 {
-					DebugP(dVote, rf.me, "T: %v | {%v} 收到了半数选票当选 Leader", rf.currentTerm, rf.me)
+					DebugP(dTrace, rf.me, "T: %v | {%v} 收到了半数选票当选 Leader", rf.currentTerm, rf.me)
 					rf.ChangeState(Leader)
 				}
 				// 不投票两个因素:
@@ -636,6 +647,7 @@ func (rf *Raft) AppendEntries_2A(args *AppendEntriesArgs, reply *AppendEntriesRe
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	// 替Leader打印日志
 	DebugP(dLog, args.LeaderId, "Term: %v | {%v}->{%v} 追加请求: %v", args.Term, args.LeaderId, rf.me, args2str(args))
@@ -674,10 +686,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if args.PrevLogIndex > rf.getLastLogIndex() {
 			reply.XTerm = -1
 			reply.XLen = args.PrevLogIndex - rf.getLastLogIndex()
-		}else {
+		} else {
 			reply.XTerm = rf.log[args.PrevLogIndex].Term
 			for i, entry := range rf.log {
-				if entry.Term == reply.XTerm{
+				if entry.Term == reply.XTerm {
 					reply.XIndex = i
 					break
 				}
@@ -784,7 +796,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
+	defer rf.persist() // defer先进后出,最后解锁
 	// 替Candidate打印日志
 	DebugP(dVote, args.CandidateId, "T: %v | {%v}->{%v} 投票请求: %v", args.Term, args.CandidateId, rf.me, args)
 	DebugP(dVote, rf.me, "T: %v | {%v}<-{%v} 投票请求: %v", rf.currentTerm, rf.me, args.CandidateId, args)
@@ -812,7 +824,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = false
 		}
 	} else if args.Term > rf.currentTerm {
-		rf.ChangeState(Follower)
+		if rf.RaftStatus != Follower {
+			rf.ChangeState(Follower)
+		}
 		rf.currentTerm = args.Term
 		rf.voteFor = -1
 		if rf.IsLogOlderOrEqual(args) {
@@ -953,7 +967,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		heartbeatsTimer: time.NewTimer(HeardBeatTimeout * time.Millisecond),
 		electionTimer:   time.NewTimer(randomDuration()),
 	}
-	DPrintf(rf.me, "{Node %d} 完成了初始化", rf.me)
 	DebugP(dInfo, rf.me, "{%d} 完成初始化", rf.me)
 	rf.HeardBeatStopAndClean()
 	// 日志定义
@@ -962,6 +975,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.ticker()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	DebugP(dTrace, rf.me, "T: %v, voteFor: %v, log.Length: %v", rf.currentTerm, rf.voteFor, len(rf.log))
 	return rf
 }
 
