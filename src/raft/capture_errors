@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/usr/bash
 
 trap 'exit 1' INT
 

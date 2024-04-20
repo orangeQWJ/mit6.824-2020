@@ -4,7 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
+	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Debugging
@@ -37,7 +41,7 @@ const (
 var colors = []string{colorRed, colorGreen, colorYellow, colorBlue, colorPurple, colorCyan, colorWhite}
 
 func DPrintf(peer int, format string, a ...interface{}) {
-	if Debug <= 0 {
+	if Debug != 3 {
 		return
 	}
 
@@ -60,10 +64,7 @@ func DPrintf(peer int, format string, a ...interface{}) {
 	return
 }
 
-func DPrintInfo(rf *Raft) {
-	if Debug <= 0 {
-		return
-	}
+func raftInfo2str(rf *Raft) string {
 	format := `
    RaftStatus: %v
    currentTerm: %v
@@ -73,8 +74,8 @@ func DPrintInfo(rf *Raft) {
    nextIndex[]: %v
    matchIndex[]: %v \n
    `
-	fmt.Printf(format, rf.RaftStatus, rf.currentTerm, log2str(-1, rf.log), rf.commitIndex, rf.lastApplied, rf.nextIndex, rf.matchIndex)
-	return
+	s := fmt.Sprintf(format, rf.RaftStatus, rf.currentTerm, log2str(-1, rf.log), rf.commitIndex, rf.lastApplied, rf.nextIndex, rf.matchIndex)
+	return s
 }
 func computeHash(input string) string {
 	h := sha256.New()
@@ -97,8 +98,82 @@ func log2str(prevLogIndex int, log []logEntry) string {
 func args2str(args *AppendEntriesArgs) string {
 	//s :="args:\nTerm: %v\n LeaderId: %v\n PrevLogIndex: %v\n PrevLogTerm: %v \nlen(Entries): %v\n LeaderCommit: %v\n"
 	//s := "Term: %v LeaderId: %v PrevLogIndex: %v PrevLogTerm: %v Entries: %v LeaderCommit: %v"
-	s := "T: %v LId: %v PI: %v PT: %v Entry: %v LC: %v"
+	s := "T:%v LId:%v PI:%v PT:%v Entry:%v LC:%v"
 	//s = fmt.Sprintf(s, args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, log2str(args.PrevLogIndex, args.Entries), args.LeaderCommit)
 	s = fmt.Sprintf(s, args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries), args.LeaderCommit)
 	return s
 }
+
+// Retrieve the verbosity level from an environment variable
+func getVerbosity() int {
+	v := os.Getenv("VERBOSE")
+	level := 0
+	if v != "" {
+		var err error
+		level, err = strconv.Atoi(v)
+		if err != nil {
+			log.Fatalf("Invalid verbosity %v", v)
+		}
+	}
+	return level
+}
+
+type logTopic string
+
+const (
+	dClient  logTopic = "CLNT"
+	dCommit  logTopic = "CMIT"
+	dDrop    logTopic = "DROP"
+	dError   logTopic = "ERRO"
+	dInfo    logTopic = "INFO"
+	dLeader  logTopic = "LEAD"
+	dLog     logTopic = "LOG1"
+	dLog2    logTopic = "LOG2"
+	dPersist logTopic = "PERS"
+	dSnap    logTopic = "SNAP"
+	dTerm    logTopic = "TERM"
+	dTest    logTopic = "TEST"
+	dTimer   logTopic = "TIMR"
+	dTrace   logTopic = "TRCE"
+	dVote    logTopic = "VOTE"
+	dWarn    logTopic = "WARN"
+)
+
+var debugStart time.Time
+var debugVerbosity int
+
+func init() {
+	debugVerbosity = getVerbosity()
+	debugStart = time.Now()
+
+	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
+}
+
+func DebugP(topic logTopic, peer int, format string, a ...interface{}) {
+	if Debug == 1 {
+		time := time.Since(debugStart).Microseconds()
+		time /= 100
+		prefix := fmt.Sprintf("%06d %v %v ", time, string(topic), peer)
+		// time topic peer
+		format = prefix + format
+		log.Printf(format, a...)
+	}
+}
+
+/*
+dClient (CLNT) - 与客户端相关的操作或交互，如客户端请求的接收和处理。
+dCommit (CMIT) - 提交操作，标志着一个或多个Raft日志条目已被安全存储且可应用到状态机。
+dDrop (DROP) - 丢弃消息或数据，可能是因为消息无效或在处理过程中遇到错误。
+dError (ERRO) - 错误事件，通常是系统遇到无法正常处理的异常情况。
+dInfo (INFO) - 提供一般性信息，用于记录系统状态或非关键事件。
+dLeader (LEAD) - 与领导者选举或领导者活动相关的事件，如领导者的更换。
+dLog (LOG1), dLog2 (LOG2) - 日志相关事件，可能涉及日志的创建、修改或复制。在Raft中，这通常指日志复制过程。
+dPersist (PERS) - 持久化相关事件，如日志条目或当前状态的持久化存储。
+dSnap (SNAP) - 快照操作，通常与状态机的快照创建和恢复相关。
+dTerm (TERM) - 与任期相关的事件，如任期的开始、结束或任期内发生的重要动作。
+dTest (TEST) - 测试相关的日志记录，可能用于调试或验证系统功能。
+dTimer (TIMR) - 定时器事件，可能与选举超时、心跳超时等计时任务相关。
+dTrace (TRCE) - 跟踪信息，用于详细记录系统的内部操作和决策过程。
+dVote (VOTE) - 投票事件，涉及Raft选举过程中的投票行为。
+dWarn (WARN) - 警告事件，用于提示可能的问题，但不一定影响系统的正常运行。
+*/

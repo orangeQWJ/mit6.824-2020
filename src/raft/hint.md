@@ -52,6 +52,7 @@ To implement heartbeats
   LastIndex = len-1
 - 那些只调用一次的函数,将锁放在函数前后,比放在函数内部可读性更好
 - test 并不会停止goroutine,所以要通过rf.killed来停止对外提供服务
+- 如果不做快速恢复,lab2 TestBackup2B 有些情况下无法通过测试
 
 
 # 关于进行持久化的时间节点
