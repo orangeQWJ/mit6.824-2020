@@ -200,7 +200,8 @@ func (rf *Raft) IsLogOlderOrEqual(args *RequestVoteArgs) bool {
 	他会在AppendEntriesReply报文中告诉Leader更新的Term
 
 - [x] bug: 当不是Leader后停止发送AppendEntriesArgs报文
-- [ ] perf: 如果在调用Start时不立即BroadcastAppendEntries,这会影响写入时延,如果立即写入,当大量写入发生时,会有大量的重复log
+- [x] perf: 如果在调用Start时不立即BroadcastAppendEntries,这会影响写入时延,如果立即写入,当大量写入发生时,会有大量的重复log
+- [ ] AppendEntries log中的T有问题,这启发我们defer中如果有变化参数,可以通过传入指针
 
 # 疑问
 
@@ -232,4 +233,4 @@ func (rf *Raft) IsLogOlderOrEqual(args *RequestVoteArgs) bool {
 - dTimer (TIMR) - 定时器事件，可能与选举超时、心跳超时等计时任务相关。
 - dTrace (TRCE) - 跟踪信息，用于详细记录系统的内部操作和决策过程。
 - dVote (VOTE) - 投票事件，涉及Raft选举过程中的投票行为。
-- dWarn (WARN) - 警告事件，用于提示可能的问题，但不一定影响系统的正常运行。
+- [ ] dWarn (WARN) - 警告事件，用于提示可能的问题，但不一定影响系统的正常运行。
