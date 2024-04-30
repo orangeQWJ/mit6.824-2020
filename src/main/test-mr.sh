@@ -15,6 +15,7 @@ mkdir mr-tmp || exit 1
 cd mr-tmp || exit 1
 rm -f mr-*
 
+alias timeout=gtimeout
 # make sure software is freshly built.
 (cd ../../mrapps && go build $RACE -buildmode=plugin wc.go) || exit 1
 (cd ../../mrapps && go build $RACE -buildmode=plugin indexer.go) || exit 1
